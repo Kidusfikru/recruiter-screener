@@ -46,11 +46,18 @@ class RuleSet:
 # ---- loading + overrides -----------------------------------------------------------------------
 def load_rules(path: str = "config/rules.yaml", overrides: Optional[List[str]] = None,
                profile: Optional[str] = None, *, require_profile: bool = False) -> RuleSet:
-    with open(path, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"invalid rules YAML: {e}") from e
+    if not isinstance(cfg, dict):
+        raise ValueError("rules YAML must contain a mapping")
 
     profiles = cfg.get("profiles")
     if profiles is not None:
+        if not isinstance(profiles, dict):
+            raise ValueError("profiles must be a mapping")
         if require_profile and not profile:
             raise ValueError("the job must select a hard-rule profile with rules_profile")
         profile = profile or cfg.get("default_profile")
@@ -60,16 +67,30 @@ def load_rules(path: str = "config/rules.yaml", overrides: Optional[List[str]] =
             raise ValueError(f"unknown rules profile {profile!r}; known: {', '.join(profiles)}")
         selected = profiles[profile] or {}
         common = cfg.get("defaults", {}) or {}
-        rules = {name: dict(values) for name, values in (common.get("rules", {}) or {}).items()}
-        for name, values in (selected.get("rules", {}) or {}).items():
+        if not isinstance(selected, dict) or not isinstance(common, dict):
+            raise ValueError("selected profile and defaults must be mappings")
+        common_rules = common.get("rules", {}) or {}
+        selected_rules = selected.get("rules", {}) or {}
+        if not isinstance(common_rules, dict) or not isinstance(selected_rules, dict):
+            raise ValueError("defaults.rules and profile.rules must be mappings")
+        for name, values in common_rules.items():
+            if not isinstance(values, dict):
+                raise ValueError(f"configuration for rule {name!r} must be a mapping")
+        rules = {name: dict(values) for name, values in common_rules.items()}
+        for name, values in selected_rules.items():
+            if not isinstance(values, dict):
+                raise ValueError(f"configuration for rule {name!r} must be a mapping")
             rules[name] = {**rules.get(name, {}), **values}
         as_of = selected.get("as_of", common.get("as_of", cfg.get("as_of")))
     else:
         # Continue accepting the original single-rule-set format.
         profile = ""
-        rules = cfg.get("rules", {})
+        rules = cfg.get("rules", {}) or {}
+        if not isinstance(rules, dict):
+            raise ValueError("rules must be a mapping")
         as_of = cfg.get("as_of")
 
+    _validate_rules(rules)
     for item in overrides or []:                               # "min_connections.threshold=20"
         if "=" not in item or "." not in item.split("=", 1)[0]:
             raise ValueError(f"--set expects rule.key=value, got: {item!r}")
@@ -78,8 +99,14 @@ def load_rules(path: str = "config/rules.yaml", overrides: Optional[List[str]] =
         if rule not in rules:
             raise ValueError(f"unknown rule {rule!r}; known: {', '.join(rules)}")
         rules[rule][key.strip()] = yaml.safe_load(rhs)
+    _validate_rules(rules)
     if isinstance(as_of, str):
-        as_of = date.fromisoformat(as_of)
+        try:
+            as_of = date.fromisoformat(as_of)
+        except ValueError as e:
+            raise ValueError(f"as_of must be an ISO date, got {as_of!r}") from e
+    elif as_of is not None and not isinstance(as_of, date):
+        raise ValueError("as_of must be an ISO date or null")
     return RuleSet(as_of=as_of or date.today(), rules=rules, profile=profile or "")
 
 
@@ -167,18 +194,23 @@ def rule_min_current_tenure(c: Candidate, cfg: dict, as_of: date) -> Check:
 
 def rule_min_total_experience(c: Candidate, cfg: dict, as_of: date) -> Check:
     name, need = "min_total_experience", cfg.get("years", 4)
-    spans = sorted((p.start, p.end or as_of) for p in c.positions if p.start and (p.end or as_of) >= p.start)
+    spans = sorted(
+        (p.start.year * 12 + p.start.month - 1,
+         (p.end or as_of).year * 12 + (p.end or as_of).month - 1)
+        for p in c.positions
+        if p.start and (p.end or as_of) >= p.start
+    )
     if not spans:
         return Check(name, "missing", "no dated positions")
-    total_days, (cs, ce) = 0, spans[0]
-    for s, e in spans[1:]:                                    # union of intervals: overlaps count once
-        if s <= ce:
+    total_months, (cs, ce) = 0, spans[0]
+    for s, e in spans[1:]:
+        if s <= ce + 1:
             ce = max(ce, e)
         else:
-            total_days += (ce - cs).days
+            total_months += ce - cs + 1
             cs, ce = s, e
-    total_days += (ce - cs).days
-    years = total_days / 365.25
+    total_months += ce - cs + 1
+    years = total_months / 12
     return Check(name, "pass" if years >= need else "fail", f"{years:.1f} years total (need {need})")
 
 
@@ -205,6 +237,64 @@ RULES: Dict[str, Callable[[Candidate, dict, date], Check]] = {
     "min_total_experience": rule_min_total_experience,
     "timezone_preference": rule_timezone_preference,
 }
+
+RULE_KEYS = {
+    "min_connections": {"enabled", "threshold", "on_missing"},
+    "job_hopper": {
+        "enabled", "short_stint_months", "max_short_stints", "ignore_current",
+        "merge_same_company", "ignore_title_keywords", "on_missing",
+    },
+    "min_current_tenure": {"enabled", "months", "merge_same_company", "on_missing"},
+    "min_total_experience": {"enabled", "years", "on_missing"},
+    "timezone_preference": {"enabled", "preferred_regions", "on_missing"},
+}
+
+
+def _validate_rules(rules: Dict[str, Dict[str, Any]]) -> None:
+    for name, cfg in rules.items():
+        if name not in RULES:
+            raise ValueError(f"unknown hard rule {name!r}; known: {', '.join(RULES)}")
+        if not isinstance(cfg, dict):
+            raise ValueError(f"configuration for rule {name!r} must be a mapping")
+        unknown = set(cfg) - RULE_KEYS[name]
+        if unknown:
+            raise ValueError(f"unknown setting(s) for rule {name!r}: {', '.join(sorted(unknown))}")
+        if "enabled" in cfg and not isinstance(cfg["enabled"], bool):
+            raise ValueError(f"{name}.enabled must be true or false")
+        if "on_missing" in cfg and (
+            not isinstance(cfg["on_missing"], str)
+            or cfg["on_missing"] not in {"pass", "fail", "flag"}
+        ):
+            raise ValueError(f"{name}.on_missing must be pass, fail, or flag")
+        for key in ("ignore_current", "merge_same_company"):
+            if key in cfg and not isinstance(cfg[key], bool):
+                raise ValueError(f"{name}.{key} must be true or false")
+        for key in ("threshold", "short_stint_months", "max_short_stints", "months"):
+            if key in cfg and (
+                isinstance(cfg[key], bool)
+                or not isinstance(cfg[key], int)
+                or cfg[key] < 0
+            ):
+                raise ValueError(f"{name}.{key} must be a non-negative integer")
+        for key in ("years",):
+            if key in cfg and (
+                isinstance(cfg[key], bool)
+                or not isinstance(cfg[key], (int, float))
+                or cfg[key] < 0
+            ):
+                raise ValueError(f"{name}.{key} must be a non-negative number")
+        if "preferred_regions" in cfg and (
+            not isinstance(cfg["preferred_regions"], list)
+            or any(not isinstance(region, str) or not region.strip()
+                   for region in cfg["preferred_regions"])
+        ):
+            raise ValueError("timezone_preference.preferred_regions must be a list of non-empty strings")
+        if "ignore_title_keywords" in cfg and (
+            not isinstance(cfg["ignore_title_keywords"], list)
+            or any(not isinstance(keyword, str) or not keyword.strip()
+                   for keyword in cfg["ignore_title_keywords"])
+        ):
+            raise ValueError("job_hopper.ignore_title_keywords must be a list of non-empty strings")
 
 
 # ---- evaluation + funnel -----------------------------------------------------------------------

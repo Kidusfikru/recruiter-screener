@@ -1,0 +1,54 @@
+slug: defi-intents-1010
+title: DeFi / Intent-Based Execution Engineer
+rules_profile: "1010"
+deep_review_threshold: 35
+deep_review_min_keyword_hits: 2
+
+# Copy this file to defi-intents-1010.yaml and set your private sheet URL/tab.
+# The real job file is ignored by Git because it may contain private identifiers.
+sheet_url: null
+sheet_tab: null
+
+description: |
+  Full-time, remote DeFi / intent-based execution engineering role.
+  Values technical ownership, production reliability, execution quality,
+  intent protocol experience, and independent delivery.
+  Preferred working hours overlap UTC+2 to UTC+4.
+
+must_have:
+  - Practical engineering experience with intents protocols, solvers, or intent-based execution infrastructure (MANDATORY)
+  - Hands-on experience developing, integrating, or maintaining DeFi transaction execution systems
+  - Proven track record of independently shipping and maintaining production infrastructure
+
+nice_to_have:
+  - Experience with EVM networks, smart contracts, or cross-chain messaging
+  - Backend systems engineering experience in Python, Rust, Go, or C++
+  - Experience in high-frequency trading, MEV, routing, or low-latency financial systems
+  - Located in or compatible with UTC+2 to UTC+4 working hours
+
+evidence_terms:
+  - intent-based
+  - intent based
+  - intent execution
+  - intents
+  - solver
+  - solvers
+  - CoW Protocol
+  - CoW Swap
+  - UniswapX
+  - 1inch Fusion
+  - NEAR Intents
+  - ERC-7683
+  - Across
+  - Anoma
+  - SUAVE
+  - batch auction
+  - RFQ
+  - orderflow
+  - market maker
+  - MEV
+  - route discovery
+  - path optimization
+
+bucket_a: 70
+bucket_b: 45

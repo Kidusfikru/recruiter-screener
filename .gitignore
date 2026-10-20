@@ -5,7 +5,8 @@ __pycache__/
 # Candidate profiles and screening results may contain personal information.
 data/
 exports/
-jobs/defi-intents-1010.yaml
+jobs/*.yaml
+!jobs/*.example.yaml
 
 # SQLite transient files
 *.db-shm

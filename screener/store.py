@@ -13,10 +13,17 @@ def _merge_candidates(old: Candidate, new: Candidate) -> Candidate:
     d_old = old.model_dump()
     d_new = new.model_dump()
     for k, v in d_new.items():
-        if v:
+        if k in {"skills", "positions", "education", "projects"}:
+            continue
+        if k == "connections_capped":
+            if new.connections is not None:
+                d_old[k] = v
+        elif k == "profile_url_is_guess":
+            if new.profile_url:
+                d_old[k] = v
+        elif v is not None and v != "":
             d_old[k] = v
     d_old["skills"] = list(dict.fromkeys(old.skills + new.skills))
-    # Combine positions
     known_pos = {(p.title.lower(), p.company_key, p.start) for p in old.positions}
     combined_pos = list(old.positions)
     for p in new.positions:
@@ -25,6 +32,19 @@ def _merge_candidates(old: Candidate, new: Candidate) -> Candidate:
             known_pos.add(sig)
             combined_pos.append(p)
     d_old["positions"] = [p.model_dump() if hasattr(p, "model_dump") else p for p in combined_pos]
+    for key, old_items, new_items, signature in (
+        ("education", old.education, new.education,
+         lambda item: (item.school.lower(), item.degree.lower(), item.field.lower())),
+        ("projects", old.projects, new.projects,
+         lambda item: (item.title.lower(), item.description.lower())),
+    ):
+        known = {signature(item) for item in old_items}
+        combined = list(old_items)
+        for item in new_items:
+            if signature(item) not in known:
+                known.add(signature(item))
+                combined.append(item)
+        d_old[key] = [item.model_dump() for item in combined]
     return Candidate.model_validate(d_old)
 
 
@@ -35,6 +55,15 @@ class Store:
         self.db.execute("CREATE TABLE IF NOT EXISTS candidates (id TEXT PRIMARY KEY, json TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS scores (cand_id TEXT, key TEXT, job_slug TEXT, "
                         "json TEXT NOT NULL, PRIMARY KEY (cand_id, key))")
+
+    def close(self) -> None:
+        self.db.close()
+
+    def __enter__(self) -> "Store":
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+        self.close()
 
     def upsert_candidates(self, cands: List[Candidate]) -> int:
         with self.db:
@@ -71,6 +100,21 @@ class Store:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO scores VALUES (?, ?, ?, ?)",
                             (cand_id, key, job_slug, result.model_dump_json()))
+
+    def delete_candidate(self, cand_id: str) -> bool:
+        with self.db:
+            cursor = self.db.execute("DELETE FROM candidates WHERE id=?", (cand_id,))
+            self.db.execute("DELETE FROM scores WHERE cand_id=?", (cand_id,))
+        return cursor.rowcount > 0
+
+    def backup(self, path: str) -> None:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        backup_db = sqlite3.connect(destination)
+        try:
+            self.db.backup(backup_db)
+        finally:
+            backup_db.close()
 
     def purge(self) -> None:
         with self.db:

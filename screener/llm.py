@@ -10,11 +10,11 @@ from datetime import date
 from typing import Dict, List, Literal, Optional, Protocol
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .models import Candidate
 
-PROMPT_VERSION = "v3.3"
+PROMPT_VERSION = "v3.4"
 DEFAULT_MODEL = os.environ.get("RL_MODEL", "qwen2.5:3b-instruct")
 DEEP_MODEL = os.environ.get("RL_DEEP_MODEL", "qwen2.5:7b-instruct")
 FAST_MODEL = os.environ.get("RL_FAST_MODEL", "llama3.2:latest")
@@ -42,10 +42,55 @@ class Job(BaseModel):
     deep_review_threshold: Optional[int] = None
     deep_review_min_keyword_hits: int = 2
 
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value):
+            raise ValueError("slug must contain lowercase letters, digits, and single hyphens only")
+        return value
+
+    @field_validator("must_have")
+    @classmethod
+    def require_must_have(cls, value: List[str]) -> List[str]:
+        if not value or any(not item.strip() for item in value):
+            raise ValueError("must_have must contain at least one non-empty requirement")
+        return value
+
+    @field_validator("bucket_a", "bucket_b")
+    @classmethod
+    def validate_bucket(cls, value: int) -> int:
+        if not 0 <= value <= 100:
+            raise ValueError("score buckets must be between 0 and 100")
+        return value
+
+    @field_validator("deep_review_threshold")
+    @classmethod
+    def validate_deep_review_threshold(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and not 0 <= value <= 100:
+            raise ValueError("deep_review_threshold must be between 0 and 100")
+        return value
+
+    @field_validator("deep_review_min_keyword_hits")
+    @classmethod
+    def validate_keyword_hit_threshold(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("deep_review_min_keyword_hits cannot be negative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_bucket_order(self) -> "Job":
+        if self.bucket_a < self.bucket_b:
+            raise ValueError("bucket_a must be greater than or equal to bucket_b")
+        return self
+
     @classmethod
     def load(cls, path: str) -> "Job":
-        with open(path, encoding="utf-8") as f:
-            return cls.model_validate(yaml.safe_load(f))
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"invalid job YAML: {e}") from e
+        return cls.model_validate(data)
 
     def requirements(self) -> List[dict]:
         reqs = [{"text": t, "kind": "must", "mandatory": "mandatory" in t.lower()} for t in self.must_have]
@@ -144,15 +189,9 @@ def _norm(s: str) -> str:
 
 def quote_is_real(quote: str, text: str) -> bool:
     q = _norm(quote)
-    if len(q) < 3:
+    if len(q) < 3 or len(q.split()) < 2:
         return False
-    t = _norm(text)
-    if q in t:
-        return True
-    words = q.split()
-    tw = set(t.split())
-    # Substring or 65% word overlap to prevent false downgrades on minor punctuation differences
-    return len(words) >= 3 and sum(w in tw for w in words) / len(words) >= 0.65
+    return q in _norm(text)
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -215,15 +254,28 @@ class OllamaClient:
         return r["message"]["content"]
 
     def embed(self, text: str) -> List[float]:
+        import httpx
+        import ollama
+
         try:
             r = self.client.embeddings(model=self.embed_model, prompt=text[:2000])
-            return r["embedding"]
-        except Exception:
-            return []
+        except (ollama.ResponseError, httpx.HTTPError) as e:
+            raise RuntimeError(f"Ollama embedding request failed: {e}") from e
+        embedding = r.get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            raise RuntimeError("Ollama returned an empty or invalid embedding")
+        return embedding
 
 
-def cache_key(job: Job, cand_text: str, model: str) -> str:
-    blob = json.dumps([PROMPT_VERSION, model, job.model_dump(), cand_text], sort_keys=True)
+def cache_key(job: Job, cand_text: str, model: str, *, semantic: bool = False,
+              embed_model: str = "", num_ctx: int = 3072) -> str:
+    blob = json.dumps(
+        [
+            PROMPT_VERSION, model, num_ctx, job.model_dump(), cand_text,
+            semantic, embed_model if semantic else "",
+        ],
+        sort_keys=True,
+    )
     return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
 
@@ -287,16 +339,20 @@ def score_candidate(c: Candidate, job: Job, client: LLMClient, model: str = "",
     expected = set(range(1, len(reqs) + 1))
     returned = [j.n for j in (out.requirements if out else [])]
     missing = expected - set(returned)
+    unexpected = set(returned) - expected
     duplicates = len(returned) != len(set(returned))
-    if out and (missing or duplicates):
+    if out and (missing or unexpected or duplicates):
         details = []
         if missing:
             details.append("missing requirement judgments: " + ", ".join(map(str, sorted(missing))))
+        if unexpected:
+            details.append("unexpected requirement numbers: " + ", ".join(map(str, sorted(unexpected))))
         if duplicates:
             details.append("duplicate requirement judgment numbers")
         evaluation_error = "; ".join(details)
 
     results: List[ReqResult] = []
+    evidence_errors = []
     for i, r in enumerate(reqs, 1):
         j = by_n.get(i)
         rr = ReqResult(requirement=r["text"], kind=r["kind"], mandatory=r["mandatory"])
@@ -304,12 +360,14 @@ def score_candidate(c: Candidate, job: Job, client: LLMClient, model: str = "",
             rr.note = "not evaluated by model" if out else f"parse error: {last_err}"
         else:
             rr.status, rr.evidence = j.status, j.evidence_quote.strip()
-            # If evidence quote doesn't match text, soften to partial rather than unknown
-            if rr.status == "met" and rr.evidence and not quote_is_real(rr.evidence, text):
-                rr.status = "partial"
-                rr.note = "evidence quote paraphrased"
+            if rr.status == "met" and not quote_is_real(rr.evidence, text):
+                rr.status = "unknown"
+                rr.note = "missing or unsupported evidence quote"
+                evidence_errors.append(f"unsupported evidence quote for requirement {i}")
         results.append(rr)
 
+    if evidence_errors:
+        evaluation_error = "; ".join(filter(None, [evaluation_error, *evidence_errors]))
     score, capped = compute_score(results, job, sim_score=sim_score)
     return ScoreResult(
         score=score, bucket="REVIEW" if evaluation_error else bucket_for(score, job),

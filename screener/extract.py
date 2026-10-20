@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import deque
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 
@@ -42,9 +43,9 @@ def _text(v: Any) -> str:
 
 def bfs(obj: Any, keys: Iterable[str], test: Callable[[Any], bool], max_depth: int = 6) -> Any:
     for key in keys:
-        queue: List[Tuple[Any, int]] = [(obj, 0)]
+        queue = deque([(obj, 0)])
         while queue:
-            node, depth = queue.pop(0)
+            node, depth = queue.popleft()
             if isinstance(node, dict):
                 if key in node and test(node[key]):
                     return node[key]
@@ -65,9 +66,9 @@ def _list_of_dicts(v: Any) -> bool:
 
 def find_all_lists(obj: Any, keys: Iterable[str], max_depth: int = 6) -> List[Tuple[str, List[Any]]]:
     wanted, out = set(keys), []
-    queue: List[Tuple[Any, int]] = [(obj, 0)]
+    queue = deque([(obj, 0)])
     while queue:
-        node, depth = queue.pop(0)
+        node, depth = queue.popleft()
         if isinstance(node, dict):
             for k, v in node.items():
                 if k in wanted and _list_of_dicts(v):
@@ -231,11 +232,25 @@ def extract_candidate(record: dict) -> Candidate:
     grouped = raw.get("groupedWorkExperience")
     if isinstance(grouped, list):
         for grp in grouped:
+            if not isinstance(grp, dict):
+                continue
             comp = _text(grp.get("companyName") or grp.get("companyUrnResolutionResult") or "")
-            pos_list = grp.get("positions") or []
-            is_cur = any(p.get("endDateOn") is None for p in pos_list if isinstance(p, dict))
+            pos_list = grp.get("positions")
+            if not isinstance(pos_list, list):
+                continue
+            is_cur = any(
+                item.get("endDateOn") is None
+                for item in pos_list
+                if isinstance(item, dict)
+            )
             for item in pos_list:
-                p = parse_position(item, force_current=(is_cur and item.get("endDateOn") is None), default_company=comp)
+                if not isinstance(item, dict):
+                    continue
+                p = parse_position(
+                    item,
+                    force_current=(is_cur and item.get("endDateOn") is None),
+                    default_company=comp,
+                )
                 if p:
                     sig = (p.title.lower(), p.company_key, p.start)
                     if sig not in seen:

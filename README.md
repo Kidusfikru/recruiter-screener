@@ -32,6 +32,10 @@ ollama pull nomic-embed-text
 Screen the newest export in your Downloads folder using the default Qwen 3B model:
 
 ```powershell
+# For a fresh checkout, create a local job file from the sanitized template.
+Copy-Item jobs\defi-intents-1010.example.yaml jobs\defi-intents-1010.yaml
+# Add your private Google Sheet URL and exact tab name to the local YAML if needed.
+
 python -m screener go jobs\defi-intents-1010.yaml
 ```
 
@@ -57,6 +61,19 @@ them on a trusted device and do not share them unintentionally. Back up
 `data\screener.db` periodically while the screener is closed, and store the
 backup somewhere protected. Ollama runs locally by default; do not change its
 host to a remote service unless you have reviewed that service's privacy terms.
+Runs refuse non-local Ollama hosts unless you explicitly acknowledge the data
+transfer with `--allow-remote-host`.
+
+`ingest --fresh` first validates the input and creates a timestamped SQLite
+backup beside the database before clearing it. Backups can contain all stored
+candidate data: protect them like the database and periodically remove old ones
+according to your retention needs. To restore one, close the screener and copy
+the chosen backup over `data\screener.db`.
+
+Use `python -m screener candidates` to find an ID, then
+`python -m screener forget "<candidate-id>"` to delete one profile and all of
+its cached scores after confirmation. Use `purge` only when you intend to clear
+the entire local database.
 
 The project is tracked in a private GitHub repository. The local 1010 job YAML,
 candidate database, exports, and virtual environment are deliberately excluded;
@@ -81,17 +98,21 @@ Run the offline tests after changing code or dependencies:
 ```powershell
 python -m unittest discover -v
 python -m compileall -q screener tests
+python -m screener doctor
 ```
 
 These tests use synthetic profiles and do not contact Ollama or Google Sheets.
-Before a real screening batch, confirm Ollama is running and inspect the CSV,
-especially rows marked `REVIEW` or `evaluation_error`.
+`doctor` checks job/rule configuration, the Ollama API, and configured model
+availability. Before a real screening batch, inspect the CSV, especially rows
+marked `REVIEW` or `evaluation_error`; scores are decision support and should
+not replace human review. Periodically review whether hard-rule thresholds
+unfairly exclude otherwise qualified applicants.
 
 ## New position setup
 
 The system separates **job scoring criteria** from **hard screening rules**:
 
-1. Create a job file in `jobs\`, usually by copying `jobs\defi-intents-1010.yaml`.
+1. Create a local job file in `jobs\` by copying the tracked sanitized example, `jobs\defi-intents-1010.example.yaml`.
 2. Give it a unique `slug` and update its title, description, requirements, and evidence terms.
 3. Add a hard-rule profile under `profiles` in `config\rules.yaml`. Give each profile a clear name and set its company/position metadata.
 4. Set the job's `rules_profile` to that profile name.
@@ -146,7 +167,7 @@ profiles:
         on_missing: flag
 ```
 
-The existing `"1010"` profile is the saved 1010.trading hard-rule configuration. Avoid changing it when setting criteria for another role; create a new profile instead. Shared values can go under `defaults.rules`, with profile-specific values overriding them.
+The existing `"1010"` profile is the saved 1010.trading hard-rule configuration. Avoid changing it when setting criteria for another role; create a new profile instead. Shared values can go under `defaults.rules`, with profile-specific values overriding them. Job YAML files are ignored by Git; only sanitized `*.example.yaml` templates are tracked.
 
 ### What can be configured without code changes?
 
@@ -173,7 +194,7 @@ Rules currently available:
 - `min_connections`: minimum connection count; a capped count such as `500+` passes when the threshold is met.
 - `job_hopper`: checks short job stints. It can merge same-company roles, ignore current roles, and ignore configured title keywords.
 - `min_current_tenure`: checks the longest current-company stint. Same-company roles separated by up to about 62 days can be merged; month counts are inclusive.
-- `min_total_experience`: totals dated work intervals, counting overlapping dates only once.
+- `min_total_experience`: totals month-precision work intervals inclusively, counting overlapping months only once.
 - `timezone_preference`: checks whether the candidate's location contains one of the configured `preferred_regions`; a non-match is missing and follows `on_missing`.
 
 For 1010, the current profile sets 30 minimum connections, disables `job_hopper`, requires 6 months in a current role, and 3 years of total experience. The 1010 job's UTC+2 to UTC+4 preference is currently a **nice-to-have LLM criterion**, not an enabled hard timezone rule.
@@ -199,7 +220,7 @@ The default database is `data\screener.db`. It stores extracted candidate profil
 
 When no export path is supplied, the program searches the user's Downloads folder, preferring the newest `candidates-detail-*.json` file, then the newest `candidates-*.json`. For repeatable runs, pass the intended export file explicitly.
 
-Candidate identity is based on an extracted Recruiter profile identifier when available, otherwise a hash of the raw profile. Re-importing updates/merges the stored profile. A cached score is reusable when the candidate text, job criteria, and selected model produce the same cache key. Changing a profile, job criteria, or model normally requires a new score.
+Candidate identity is based on an extracted Recruiter profile identifier when available, otherwise a hash of the raw profile. Re-importing updates/merges the stored profile. A cached score is reusable when the candidate text, job criteria, selected model/context size, and scoring mode match; semantic ranking also keys on the embedding model. Changing a profile, job criteria, or model normally requires a new score.
 
 Use a separate database when you intentionally want isolated history:
 
@@ -212,6 +233,10 @@ python -m screener go jobs\defi-intents-1010.yaml --db data\1010-test.db
 ```powershell
 python -m screener ingest "C:\path\to\candidates.json" --fresh
 ```
+
+The input is parsed and checked for candidate records before the database is
+changed. If the database exists, a timestamped backup is made before the fresh
+import replaces its contents.
 
 `purge` also deletes all candidates and scores for the selected database:
 
@@ -237,7 +262,8 @@ Important limitations:
 - The sheet needs to be accessible to the screener's unauthenticated CSV download. This code does not sign in to Google.
 - The screener only **reads** the sheet for deduplication. It does not add or update rows in Google Sheets.
 - Only URLs containing `linkedin.com/in/` are collected. Guessed Talent profile links and other URL formats may not match.
-- If fetching or parsing the sheet fails, the program warns and proceeds **without deduplication**. Check the warning before relying on a run to exclude already-contacted people.
+- If the configured sheet cannot be read, or contains no LinkedIn profile URLs, the run stops before importing candidates. To proceed intentionally without sheet deduplication, pass `--no-sheet-dedup`.
+- Candidates without a usable LinkedIn profile URL cannot be matched to the sheet; the run reports their count.
 - If `sheet_tab` is omitted, the default sheet tab is used.
 
 ## Default, two-stage, deep, and fast scoring
@@ -265,13 +291,31 @@ Only one of `--fast`, `--deep`, and `--two-stage` may be specified. `--model` se
 
 The 1010 job sets `deep_review_threshold: 35` (10 below its B-bucket cutoff of 45) and `deep_review_min_keyword_hits: 2`. When `--two-stage` is used, Qwen 3B results go to Qwen 7B if they meet the threshold, contain enough exact evidence-term hits, have uncertain mandatory evidence plus at least one evidence hit, or have invalid/incomplete output. These settings are per job and should be tuned when a role has different score buckets or evidence terms. A Qwen 3B score below the deep threshold is **not** a hard rejection: every candidate that passes hard rules remains in the CSV.
 
-Full-batch scoring skips semantic embeddings; use `--limit` to embed and rank the eligible batch before scoring the top N. In that limited workflow, only the top N scored candidates and hard-rule failures appear in the CSV.
+Full-batch scoring skips semantic embeddings; use `--limit` to embed and rank the eligible batch before scoring the top N. Embedding errors stop this workflow instead of silently falling back to input order. Limited semantic scores use a distinct cache key from full-batch rubric scores. In that limited workflow, only the top N scored candidates and hard-rule failures appear in the CSV.
 
 ### Small local model comparison
 
 On six profiles with cached Qwen 7B evaluations, schema-constrained Qwen 3B took about 5–7 seconds per response with a 4,096-token context and matched the 7B bucket on only one profile. It assigned higher buckets to some profiles rated C by 7B. Under the conservative 1010 escalation rules, all six profiles were selected for deep review. This small local comparison is not a general benchmark, but it shows why the two-stage mode is opt-in: with these settings it did not reduce the number of 7B calls, and Qwen 3B alone should be treated as a quick shortlist, not an equivalent replacement for Qwen 7B. Long profiles can still take longer.
 
-The CSV's `model` column identifies which model produced each final score. Malformed or incomplete outputs are marked `REVIEW` in the bucket and described in `evaluation_error`; they are not cached as valid evaluations. Review borderline candidates and rows with evaluation errors.
+The CSV's `model` column identifies which model produced each final score. Malformed or incomplete outputs are marked `REVIEW` in the bucket and described in `evaluation_error`; they are not cached as valid evaluations. Spreadsheet-formula-like text values are prefixed with an apostrophe in CSV output. Review borderline candidates and rows with evaluation errors.
+
+A model judgment of `met` is only accepted when its substantive evidence quote
+(at least two words) matches normalized candidate text. Missing or unsupported
+quotes become `unknown` and are subject to mandatory score caps; the row is
+marked `REVIEW` and the result is not cached as valid.
+
+### Score calibration and human review
+
+The model and score thresholds are **not statistically calibrated** to a
+representative set of hiring outcomes. The small model comparison above is an
+exploratory check, not a validation study. Before relying on a shortlist,
+manually review a varied set of anonymized profiles against each requirement,
+record evidence-based decisions outside the production candidate database, and
+compare model judgments with those decisions. Revisit hard rules for unintended
+exclusion effects (including connection-count and tenure thresholds). No
+candidate should be rejected or advanced solely because of an automated score.
+Calibration remains a manual step because a trustworthy reference set requires
+your reviewed labels; none is fabricated or committed to this repository.
 
 Ollama must be running locally (default host `http://localhost:11434`). The embedding model defaults to `nomic-embed-text`; override it with `--embed-model` or `RL_EMBED_MODEL`. Use `ollama list` to view installed models.
 
@@ -306,6 +350,15 @@ python -m screener go jobs\defi-intents-1010.yaml "C:\path\to\candidates.json" -
 
 # Delete all stored candidates and scores after confirmation.
 python -m screener purge
+
+# List local candidate IDs and names.
+python -m screener candidates
+
+# Delete one profile and its cached scores after confirmation.
+python -m screener forget "candidate-id"
+
+# Check job/rules, local Ollama and configured model tags.
+python -m screener doctor
 ```
 
 Run `python -m screener <command> --help` for the current command options.
@@ -321,6 +374,7 @@ Candidate names and profile URLs are used in the local CSV report, not in the ca
 ```text
 config\rules.yaml             Shared defaults and named hard-rule profiles
 jobs\<job>.yaml               Role description, rubric, sheet settings, profile selection
+jobs\*.example.yaml           Sanitized tracked job templates
 screener\cli.py               CLI workflow and batch selection
 screener\rules.py             Hard-rule evaluators and profile loading
 screener\llm.py               Job schema, Ollama integration, scoring and cache key
