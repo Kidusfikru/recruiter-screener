@@ -58,6 +58,22 @@ them on a trusted device and do not share them unintentionally. Back up
 backup somewhere protected. Ollama runs locally by default; do not change its
 host to a remote service unless you have reviewed that service's privacy terms.
 
+The project is tracked in a private GitHub repository. The local 1010 job YAML,
+candidate database, exports, and virtual environment are deliberately excluded;
+the job file contains a personal spreadsheet link. After changing tracked code
+or configuration, review and sync it with:
+
+```powershell
+git status --short
+git add -A
+git commit -m "Describe the change"
+git push
+```
+
+Pushes are manual, so local commits remain on this computer until `git push`
+succeeds. Do not force-push or add the ignored job/database/export files unless
+you have reviewed their contents and intend to share them.
+
 ### Quick checks
 
 Run the offline tests after changing code or dependencies:
