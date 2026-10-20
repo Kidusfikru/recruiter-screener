@@ -1,0 +1,41 @@
+# Hard screening profiles. Add one profile per company or position and select it
+# from the job YAML with `rules_profile`; `--profile` can override it for a run.
+# `defaults.rules` may contain shared rule settings; each profile overrides only
+# the values it needs. Keep rule names aligned with screener/rules.py.
+# `on_missing` accepts `pass`, `fail`, or `flag` (retain for manual review).
+default_profile: "1010"
+
+defaults:
+  as_of: null
+  rules: {}
+
+profiles:
+  "1010":
+    company: "1010.trading"
+    position: "defi-intents-1010"
+    as_of: null
+    rules:
+      min_connections:
+        enabled: true
+        threshold: 30
+        on_missing: flag
+
+      job_hopper:
+        enabled: false # Protocol transitions are evaluated by the 1010.trading role rubric.
+        short_stint_months: 12
+        max_short_stints: 3
+        ignore_current: true
+        merge_same_company: true
+        ignore_title_keywords: [intern, internship, apprentice, trainee]
+        on_missing: flag
+
+      min_current_tenure:
+        enabled: true
+        months: 6 # Lowered to catch active movers.
+        merge_same_company: true
+        on_missing: flag
+
+      min_total_experience:
+        enabled: true
+        years: 3 # Lowered to include strong crypto-native builders.
+        on_missing: flag

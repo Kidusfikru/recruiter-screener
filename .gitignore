@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Candidate profiles and screening results may contain personal information.
+data/
+exports/
+jobs/defi-intents-1010.yaml
+
+# SQLite transient files
+*.db-shm
+*.db-wal
